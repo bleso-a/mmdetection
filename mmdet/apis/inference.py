@@ -5,6 +5,7 @@ from pathlib import Path
 import mmcv
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 from mmcv.ops import RoIPool
 from mmcv.parallel import collate, scatter
 from mmcv.runner import load_checkpoint
@@ -48,9 +49,64 @@ def init_detector(config, checkpoint=None, device='cuda:0', cfg_options=None):
             model.CLASSES = checkpoint['meta']['CLASSES']
         else:
             warnings.simplefilter('once')
-            warnings.warn('Class names are not saved in the checkpoint\'s '
+            warnings.warn("Class names are not saved in the checkpoint's "
                           'meta data, use COCO classes by default.')
             model.CLASSES = get_classes('coco')
+    model.cfg = config  # save the config in the model for convenience
+    model.to(device)
+    model.eval()
+    return model
+
+
+def init_detector_from_hf_hub(repo_id: str, device='cuda:0', cfg_options=None):
+    """Initialize a detector from huggingface hub.
+
+    Args:
+        repo_id (str): The hugginface repo id of the model.
+        cfg_options (dict): Options to override some settings in the used
+            config.
+
+    Returns:
+        nn.Module: The constructed detector.
+    """
+    config_file_path = hf_hub_download(
+        repo_id=repo_id,
+        filename='config.py')  # download the config from the hub
+
+    checkpoint = hf_hub_download(
+        repo_id=repo_id,
+        filename='pytorch_model.pth',
+    )  # download the model from the hub
+
+    if not Path(config_file_path).exists():
+        raise FileNotFoundError(
+            'Config file not found at {}'.format(config_file_path))
+    if not Path(checkpoint).exists():
+        raise FileNotFoundError(
+            'Checkpoint file not found at {}'.format(checkpoint))
+
+    with open(config_file_path) as f:
+        config_string = f.read()
+
+    config = mmcv.Config.fromstring(config_string, file_format='.py')
+    if cfg_options is not None:
+        config.merge_from_dict(cfg_options)
+    if 'pretrained' in config.model:
+        config.model.pretrained = None
+    elif 'init_cfg' in config.model.backbone:
+        config.model.backbone.init_cfg = None
+    config.model.train_cfg = None
+    model = build_detector(config.model, test_cfg=config.get('test_cfg'))
+    if checkpoint is not None:
+        checkpoint = load_checkpoint(model, checkpoint, map_location='cpu')
+        if 'CLASSES' in checkpoint.get('meta', {}):
+            model.CLASSES = checkpoint['meta']['CLASSES']
+        else:
+            warnings.simplefilter('once')
+            warnings.warn("Class names are not saved in the checkpoint's "
+                          'meta data, use COCO classes by default.')
+            model.CLASSES = get_classes('coco')
+
     model.cfg = config  # save the config in the model for convenience
     model.to(device)
     model.eval()
@@ -213,14 +269,16 @@ async def async_inference_detector(model, imgs):
     return results
 
 
-def show_result_pyplot(model,
-                       img,
-                       result,
-                       score_thr=0.3,
-                       title='result',
-                       wait_time=0,
-                       palette=None,
-                       out_file=None):
+def show_result_pyplot(
+    model,
+    img,
+    result,
+    score_thr=0.3,
+    title='result',
+    wait_time=0,
+    palette=None,
+    out_file=None,
+):
     """Visualize the detection results on the image.
 
     Args:
@@ -248,4 +306,5 @@ def show_result_pyplot(model,
         bbox_color=palette,
         text_color=(200, 200, 200),
         mask_color=palette,
-        out_file=out_file)
+        out_file=out_file,
+    )
